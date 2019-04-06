@@ -1,6 +1,7 @@
 import socket
 import re
 import dns.resolver
+import copy
 
 
 # DNS在本地缓存，不再每次都重复获取
@@ -33,11 +34,7 @@ class RequestLine:
 
     def build(self, method, request_uri, http_version="HTTP/1.1"):
         """
-        接收参数构建请求行
-        :param method:
-        :param request_uri:
-        :param http_version:
-        :return:
+        注意处理中文URL问题，进行URL编码
         """
         self.method = method
         self.request_uri = request_uri
@@ -46,8 +43,6 @@ class RequestLine:
     def parse(self, bytes_data):
         """
         从自己数据解析成请求行对象，与build作用相反
-        :param bytes_data:
-        :return:
         """
 
     def bytes(self):
@@ -72,10 +67,16 @@ class StatusLine:
         self.status_code = temp[1]        # 状态码
         self.reason_phrase = temp[2]      # 原因短语
 
+    def build(self):
+        pass
+
 
 class Headers:
     def __init__(self):
         self.headers = {}
+
+    def build(self):
+        pass
 
     def parse(self, bytes_data):
         self.headers = dict([x.split(": ") for x in bytes_data.decode().split("\r\n")])
@@ -85,43 +86,52 @@ class Headers:
 
 
 class Body:
+    """
+    这里是整份代码之中的唯一一个特殊情况，此处content是存储字节流的，其他类都是直接存储字符串的
+    这里存储字节流是因为下载二进制文件的时候无法以字符串保存内容
+    """
     def __init__(self):
-        self.__charset = "utf-8"
-        self.__content_length = 0           # 消息长度，计算方法依据 RFC2616 Section 4.4，
-        self.__content = ""
+        self.charset = "utf-8"
+        self.content = b""
 
         # 这里把一部分实体首部给放进来比较合适，方便编程，发送报文的时候会将这里的内容更新到request对象的Headers里面
-        self.__part_header = None
+        self.part_header = {
+            "Content-Length": 0,            # 消息长度，计算方法依据 RFC2616 Section 4.4，
+        }
 
-    def update(self):
-        # 每次切换字符集之后执行一下这个，确保主体长度是正确的数值
-        temp = self.__content.encode(self.__charset)
-        self.__content_length = temp.__len__()
-        return temp
+    def build(self, string_or_bytes_data, charset="utf-8", **kwargs):
+        """
+        这里既可以接收字符串，也可以接收字节流
 
-    # 需要定义set和get方法是因为不想让用户能直接对这些属性进行操作，
-    # 因为每个操作要额外执行一步update操作，直接操作属性的话会导致内容、字符集、长度不匹配
-    def set_content(self, string_data):
-        self.__content = string_data
-        self.update()
+        """
+        data = string_or_bytes_data
 
-    def set_charset(self, charset):
-        self.__charset = charset
-        self.update()
+        # 如果是字节类型就直接存储
+        if isinstance(data, bytes):
+            self.content = data
 
-    def get_content(self):
-        return self.__content
+        # 如果是字符串就编码成字节数组再存储
+        if isinstance(data, str):
+            self.charset = charset
+            self.content = data.encode(self.charset)
 
-    def get_content_length(self):
-        return self.__content_length
+        # 存储之后记录下长度
+        self.part_header["Content-Length"] = self.content.__len__()
 
-    def get_charset(self):
-        return self.__charset
+        if "content_type" in kwargs:
+            self.part_header["Content-Type"] = kwargs["content_type"]
+
+    def parse(self, bytes_data, charset="utf-8"):
+        """
+        因为类型的特殊性，这里parse和build实际上已经是同一个函数了，保留这个为了语义方便理解
+        """
+        self.build(bytes_data, charset)
 
     def bytes(self):
-        # 目前就不进行压缩编码了，统一用utf-8编码。得出来是多少就是多少，不进行压缩
+        return self.content
 
-        return self.update()
+    def text(self):
+        return self.content.decode(self.charset)
 
 
 class Response:
@@ -141,11 +151,6 @@ class Response:
         self.headers = Headers()
         self.body = Body()
 
-    def parse_body(self, charset, bytes_data):
-        self.body.set_content(bytes_data.decode(charset))
-
-    def get_content(self):
-        return self.body.get_content()
 
 
 class Request:
@@ -176,13 +181,16 @@ class Request:
             'ip': ''
         }
 
-    def __parse_uri(self, uri):
+    def parse_uri(self, uri):
         """
         这个函数是将URI解析为请求行的URI，顺便还将主机名和端口分析出来
         # 将ip，端口等信息存起来
         :param uri:
         :return:
         """
+
+
+        # 注意处理纯ip网址问题，不要用DNS解析纯ip的网址
 
         # 这几个正则表达式应该可以合并成一个的，目前水平不够，先用判断语句来实现
 
@@ -207,42 +215,30 @@ class Request:
         """
         此处根据输入的参数构建请求包
         """
-
-        self.__parse_uri(uri)
+        self.parse_uri(uri)
+        print(self.conn_info)
         self.headers.headers.update({"Host": self.conn_info["host"]})       # 往请求头中加入主机名
 
         # get请求的参数
         u = self.conn_info["request_uri"]
         if "params" in kwargs:
-            if "?" not in u:
-                u += "?"
-                temp = list(kwargs["params"].keys())[0]
-                u += "%s=%s" % (temp, kwargs["params"][temp])
-                kwargs["params"].pop(temp)
+            u += "?" if "?" not in u else "&"
+            u += "&".join(["%s=%s" % (k, v) for k, v in kwargs["params"].items()])
 
-            for k, v in kwargs["params"].items():
-                    u += "&%s=%s" % (k, v)
+        # post请求的参数
+        if "data" in kwargs:
+            temp = "&".join(["%s=%s" % (k, v) for k, v in kwargs["data"].items()])
+            self.body.build(temp)
+            self.headers.headers.update(self.body.part_header)   # 带上首部，指定实体的长度是多少，否则服务端将不能正确识别
+
+        # put请求的文件内容
+        if "content" in kwargs:
+            self.body.build(kwargs["content"])
+            self.headers.headers.update(self.body.part_header)
 
         # 构建请求行
         self.request_line.build(method.upper(), u)
 
-        # post请求的主体数据
-        if "data" in kwargs:
-            temp2 = ""
-            temp = list(kwargs["data"].keys())[0]
-            temp2 += "%s=%s" % (temp, kwargs["data"][temp])
-
-            kwargs["data"].pop(temp)
-
-            for k, v in kwargs["data"].items():
-                    temp2 += "&%s=%s" % (k, v)
-
-            self.body.set_content(temp2)
-
-            # 带上实体首部，指定实体的长度是多少，否则服务端将不能正确识别
-            self.headers.headers.update({"Content-Length": self.body.get_content_length()})
-
-            print(self.conn_info)
 
     def bytes(self):
 
@@ -328,7 +324,7 @@ class Session:
 
                 if buffer.__len__() >= int(response.headers.headers["Content-Length"]):
                     print(222)
-                    response.parse_body("utf-8", buffer)
+                    response.body.parse(buffer)
                     break
 
                 d = self.socket.recv(1024)
@@ -342,29 +338,48 @@ class Session:
         # 持久连接搞定了！！！
         print(response.status_line.__dict__)
         print(response.headers.headers)
-        print(response.get_content())
-        self.last_request = request
+        print(response.body.text())
         self.last_response = response
         return response
 
     def get(self, uri, **kwargs):
         request = Request()
-        request.build("GET", uri)
+        request.build("GET", uri, **kwargs)
         self.send(request)
 
     def post(self, uri, **kwargs):
         request = Request()
-        request.build("POST", uri)
+        request.build("POST", uri, **kwargs)
         self.send(request)
 
-    def put(self):
-        pass
+    def put(self, uri, **kwargs):
+        request = Request()
+        request.build("PUT", uri, **kwargs)
+        self.send(request)
 
     def delete(self):
+        pass
+
+    def options(self):
+        pass
+
+    def head(self):
+        pass
+
+    def connect(self):
+        pass
+
+    def trace(self):
         pass
 
 
 s = Session()
 
-s.get("http://www.httpbin.org/get")
-# s.get("http://www.httpbin.org/get")
+# s.get("http://www.httpbin.org/get?c=3", params={"a": "1", "b": 2}, )
+
+# s.post("http://www.httpbin.org/post", data={"a": "1", "b": "2"}, )
+
+s.put("http://www.httpbin.org/put", content=b"66666")
+a = b"123"
+
+
