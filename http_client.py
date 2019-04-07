@@ -17,7 +17,10 @@ class DNS:
             ip = dns.resolver.query(host_string, 'A').response.answer[-1].items[0].address
             DNS.dns_dict.update({host_string: ip})
             return ip
-
+# class PostForm:
+#     # 这里应该有个便捷的方法，可以直接把抓包软件抓到的破石头
+#     def parse(self, stringdata):
+#         pass
 
 class RequestLine:
 
@@ -99,6 +102,39 @@ class Headers(UserDict):
         return "".join([k + ': ' + str(v) + '\r\n' for k, v in self.items()]).encode()
 
 
+class Cookie:
+
+    def __init__(self,  host, ip, port, time, content):
+        self.host = host
+        self.ip = ip
+        self.port = port
+        self.time = time
+        self.content = content
+
+
+class CK:
+    """
+    先使用最暴力的搜索方式，最后再构造效率更高的数据结构来替换
+    """
+    def __init__(self):
+        self.cookies = []
+
+    def append(self, host, ip, port, time, content):
+        self.cookies.append(Cookie(host, ip, port, time, content))
+
+    def get(self, host, ip, port):
+
+        for i in self.cookies:
+            # print(host, i.host)
+            # print(ip, i.ip)
+            # print(port, i.port)
+            if (i.host == host or i.ip == ip) and i.port == port:
+                return i
+        else:
+            return None     # 如果找不到返回一个None吧
+
+ck = CK()
+
 class Body:
     """
     这里是整份代码之中的唯一一个特殊情况，此处content是存储字节流的，其他类都是直接存储字符串的
@@ -165,7 +201,6 @@ class Response:
         self.body = Body()
 
 
-
 class Request:
 
     """
@@ -202,7 +237,6 @@ class Request:
         :return:
         """
 
-
         # 注意处理纯ip网址问题，不要用DNS解析纯ip的网址
 
         # 这几个正则表达式应该可以合并成一个的，目前水平不够，先用判断语句来实现
@@ -232,6 +266,10 @@ class Request:
         print(self.conn_info)
         self.headers += {"Host": self.conn_info["host"]}       # 往请求头中加入主机名
 
+        # 处理额外传入的自定义header
+        if kwargs.__contains__("headers"):
+            self.headers += kwargs["headers"]
+
         # get请求的参数
         u = self.conn_info["request_uri"]
         if "params" in kwargs:
@@ -244,13 +282,22 @@ class Request:
             self.body.build(temp)
             self.headers += self.body.part_header   # 带上首部，指定实体的长度是多少，否则服务端将不能正确识别
 
-        # put请求的文件内容
+        # content这个字段，不只是put请求会用到，post请求也可以通过设置这个东西来传输原始数据
+        # 避免了requests库那样子还要手动改装成字典
+        # 从抓包软件上面复制下来的数据就可以直接填入参数传进来了
         if "content" in kwargs:
             self.body.build(kwargs["content"])
             self.headers += self.body.part_header
 
         # 构建请求行
         self.request_line.build(method.upper(), u)
+
+        # 检查本地是否有cookies， 如果有就带上
+        cccc = ck.get(self.conn_info["host"], self.conn_info["ip"], self.conn_info["port"])
+        # print(cccc)
+        # print(ck.cookies.__str__())
+        if cccc is not None:
+            self.headers += {"Cookies": cccc.content}
 
     def bytes(self):
 
@@ -263,7 +310,10 @@ class Request:
         return rtn_bytes
 
 
+
+
 class Session:
+
     """
     Session对象是持续不变的，而Request对象是每一次发包都重新创建的
     每一次都需要重新创建Request对象，是因为残留的变量实在太多了，一不小心可能会将上一次请求报文的内容又给继续带上去
@@ -271,7 +321,7 @@ class Session:
     """
     def __init__(self):
         self.socket = None                              # 将套接字储存，用于持久连接和非持久连接
-        self.store_headers = None                       # 将报文首部保存，记录客户端状态
+        self.cookies = None                       # 将cookies保存，记录客户端状态
         # self.request = Request()                      # 真正用来首发请求报文的是这个，这玩意每次都需要创建新的，用完即丢
 
         self.last_request = None                      # 将上一个请求包保存下来，这样，在持久连接的问题就很好处理
@@ -316,7 +366,7 @@ class Session:
 
         print("send......")
         print("ip is ", ip)
-        print("data to send is\n", bytes_data)
+        print("data to send is\t + ", bytes_data)
 
         flag = False
 
@@ -341,7 +391,7 @@ class Session:
         包括重定向跳转和储存cookies的过程应该最好也就在这里处理
         :return:
         """
-        print("proc......")
+        # print("proc......")
         self.send(request)
 
         # 创建Response对象用来存储返回的这些数据
@@ -355,11 +405,24 @@ class Session:
             # 在这里继续接收主体（如果有主体的话）
             self.recv_body(response, buffer)
 
-        print("proc done......")
+        # print("proc done......")
         print(response.status_line.__dict__)
         print(response.headers)
         print(response.body.text())
+
         self.last_response = response
+        self.last_request = request
+
+        # 检测set-cookies
+        if response.headers.__contains__("Set-Cookie"):
+            print(response.headers["Set-Cookie"])
+            ck.append(request.conn_info["host"], request.conn_info["ip"], request.conn_info["port"], None, response.headers["Set-Cookie"])
+
+
+        # 检测跳转，如果有跳转，强行转化为GET方法。（这里后期要进行规则细分，不同的3xx状态码处理方式不同）
+        if re.match("3..", response.status_line.status_code) is not None:
+            return self.get("http://" + request.headers["Host"] + response.headers["Location"])
+
         return response
 
     def get(self, uri, **kwargs):
@@ -411,7 +474,14 @@ s = Session()
 
 # s.head("http://www.httpbin.org/head")
 
-s.options("http://www.httpbin.org/get")
+# s.options("http://www.httpbin.org/get")
+
+
+# s.get("http://www.httpbin.org/redirect/3")
+
+# 测试cookies
+s.get("http://www.yiban.cn/", headers={"Connection": "close"})
+s.get("http://www.yiban.cn/",  headers={"Connection": "close"})
 
 # 测试断点续传
 # s.get("http://down4.greenxiazai.com:8080/down/234000/201806/%E6%9A%B4%E9%A3%8E%E5%BD%B1%E9%9F%B35%20v5.76.0613.1111.rar")
