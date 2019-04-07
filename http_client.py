@@ -2,7 +2,7 @@ import socket
 import re
 import dns.resolver
 import copy
-
+from collections import UserDict
 
 # DNS在本地缓存，不再每次都重复获取
 class DNS:
@@ -65,24 +65,38 @@ class StatusLine:
         temp = bytes_data.decode().split(" ")
         self.http_version = temp[0]       # http版本
         self.status_code = temp[1]        # 状态码
-        self.reason_phrase = temp[2]      # 原因短语
+        self.reason_phrase = " ".join(temp[2:])      # 原因短语
 
     def build(self):
         pass
 
 
-class Headers:
-    def __init__(self):
-        self.headers = {}
+class Headers(UserDict):
+    """
+    继承字典类，对其进行功能增强, 这个类是整份代码里面用得最多、用得最爽的一个类
+    """
+    def __init__(self, data=None, **kwargs):
+        UserDict.__init__(self)
+        data = {} if data is None else data
+        self.update(data)
+        self.update(kwargs)
+
+    def __add__(self, other):
+        """
+        重载加号运算符，实现字典相加。注意如果有相同字段，后者覆盖前者
+        """
+        rtn_dict = copy.deepcopy(Headers(self.data))
+        rtn_dict.update(other)
+        return rtn_dict
 
     def build(self):
         pass
 
     def parse(self, bytes_data):
-        self.headers = dict([x.split(": ") for x in bytes_data.decode().split("\r\n")])
+        self.update(dict([x.split(": ") for x in bytes_data.decode().split("\r\n")]))
 
     def bytes(self):
-        return "".join([k + ': ' + str(v) + '\r\n' for k, v in self.headers.items()]).encode()
+        return "".join([k + ': ' + str(v) + '\r\n' for k, v in self.items()]).encode()
 
 
 class Body:
@@ -95,9 +109,8 @@ class Body:
         self.content = b""
 
         # 这里把一部分实体首部给放进来比较合适，方便编程，发送报文的时候会将这里的内容更新到request对象的Headers里面
-        self.part_header = {
-            "Content-Length": 0,            # 消息长度，计算方法依据 RFC2616 Section 4.4，
-        }
+        # 消息长度，计算方法依据 RFC2616 Section 4.4，
+        self.part_header = Headers() + {"Content-Length": 0}
 
     def build(self, string_or_bytes_data, charset="utf-8", **kwargs):
         """
@@ -217,7 +230,7 @@ class Request:
         """
         self.parse_uri(uri)
         print(self.conn_info)
-        self.headers.headers.update({"Host": self.conn_info["host"]})       # 往请求头中加入主机名
+        self.headers += {"Host": self.conn_info["host"]}       # 往请求头中加入主机名
 
         # get请求的参数
         u = self.conn_info["request_uri"]
@@ -229,16 +242,15 @@ class Request:
         if "data" in kwargs:
             temp = "&".join(["%s=%s" % (k, v) for k, v in kwargs["data"].items()])
             self.body.build(temp)
-            self.headers.headers.update(self.body.part_header)   # 带上首部，指定实体的长度是多少，否则服务端将不能正确识别
+            self.headers += self.body.part_header   # 带上首部，指定实体的长度是多少，否则服务端将不能正确识别
 
         # put请求的文件内容
         if "content" in kwargs:
             self.body.build(kwargs["content"])
-            self.headers.headers.update(self.body.part_header)
+            self.headers += self.body.part_header
 
         # 构建请求行
         self.request_line.build(method.upper(), u)
-
 
     def bytes(self):
 
@@ -265,17 +277,53 @@ class Session:
         self.last_request = None                      # 将上一个请求包保存下来，这样，在持久连接的问题就很好处理
         self.last_response = None
 
+    def recv_head(self, response, buffer, **kwargs):
+        print("recv_head......")
+
+        while True:
+
+            d = self.socket.recv(1024)
+            if d:
+                buffer += d
+                print(buffer)
+                if b'\r\n\r\n' in buffer:
+                    response.status_line.parse(buffer[: buffer.find(b"\r\n")])    # 解析状态行
+                    response.headers.parse(buffer[buffer.find(b"\r\n")+2: buffer.find(b"\r\n\r\n")])  # 解析响应头
+                    break
+            else:
+                break       # 如果服务端已经断开连接，那就没必要再继续接收了
+
+        # 把报文首部截去
+        buffer = buffer[buffer.find(b"\r\n\r\n") + 4:]
+        return buffer
+
+    def recv_body(self, response, buffer):
+        print("recv_body......")
+        while True:
+            if buffer.__len__() >= int(response.headers["Content-Length"]):
+                response.body.parse(buffer)
+                break
+            d = self.socket.recv(1024)
+            if d:
+                buffer += d
+            else:
+                break
+        return buffer
+
     def send(self, request):
+
         ip, port, bytes_data = request.conn_info["ip"], request.conn_info["port"], request.bytes()
-        print(ip)
-        print(bytes_data)
+
+        print("send......")
+        print("ip is ", ip)
+        print("data to send is\n", bytes_data)
 
         flag = False
 
         # 根据条件, 判断是否复用套接字
         if self.last_response is None:
             flag = True
-        elif "close".upper() in self.last_response.headers.headers["Connection"].upper():
+        elif "close".upper() in self.last_response.headers["Connection"].upper():
             flag = True
         elif ip != self.last_request.conn_info["ip"] or port != self.last_request.conn_info["port"]:
             flag = True
@@ -287,57 +335,29 @@ class Session:
 
         self.socket.send(bytes_data)
 
+    def proc(self, request):
+        """
+        应该在这里调用send和recv函数，发送和接收就只管发送接收，处理业务逻辑应该就在这里完成
+        包括重定向跳转和储存cookies的过程应该最好也就在这里处理
+        :return:
+        """
+        print("proc......")
+        self.send(request)
+
         # 创建Response对象用来存储返回的这些数据
         response = Response()
+        buffer = b""
 
-        # 直接死循环接收也没啥问题，但是一定要关闭持久连接。在持久连接的情况下，这个循环会堵塞，不停地接收数据
-        buffer = b''
+        # 接收响应报文头
+        buffer = self.recv_head(response, buffer)
 
-        while True:
+        if "Content-Length" in response.headers.keys() and request.request_line.method != "HEAD":
+            # 在这里继续接收主体（如果有主体的话）
+            self.recv_body(response, buffer)
 
-            d = self.socket.recv(1024)
-            if d:
-                buffer += d
-                print(buffer)
-
-                """
-                在持久连接的情况下，接收到空行就可以先把报文首部拿过去处理了，
-                先处理一下读取Content-Length才能依据这个长度来读取报文主体
-                """
-                if b'\r\n\r\n' in buffer:
-
-                    temp = buffer[: buffer.find(b"\r\n")]
-                    response.status_line.parse(temp)    # 解析状态行
-
-                    temp = buffer[buffer.find(b"\r\n")+2: buffer.find(b"\r\n\r\n")]
-                    response.headers.parse(temp)  # 解析响应头
-                    break
-            else:
-                break
-
-        # 在这里继续接收主体（如果有主体的话）
-        if "Content-Length" in response.headers.headers.keys():
-            print(111)
-            buffer = buffer[buffer.find(b"\r\n\r\n")+4:]
-
-            while True:
-
-                if buffer.__len__() >= int(response.headers.headers["Content-Length"]):
-                    print(222)
-                    response.body.parse(buffer)
-                    break
-
-                d = self.socket.recv(1024)
-                if d:
-                    buffer += d
-                    print(buffer)
-                else:
-                    break
-
-        print(333)
-        # 持久连接搞定了！！！
+        print("proc done......")
         print(response.status_line.__dict__)
-        print(response.headers.headers)
+        print(response.headers)
         print(response.body.text())
         self.last_response = response
         return response
@@ -345,26 +365,32 @@ class Session:
     def get(self, uri, **kwargs):
         request = Request()
         request.build("GET", uri, **kwargs)
-        self.send(request)
+        self.proc(request)
 
     def post(self, uri, **kwargs):
         request = Request()
         request.build("POST", uri, **kwargs)
-        self.send(request)
+        self.proc(request)
 
     def put(self, uri, **kwargs):
         request = Request()
         request.build("PUT", uri, **kwargs)
-        self.send(request)
+        self.proc(request)
 
-    def delete(self):
-        pass
+    def delete(self, uri, **kwargs):
+        request = Request()
+        request.build("DELETE", uri, **kwargs)
+        self.proc(request)
 
-    def options(self):
-        pass
+    def options(self, uri, **kwargs):
+        request = Request()
+        request.build("OPTIONS", uri, **kwargs)
+        self.proc(request)
 
-    def head(self):
-        pass
+    def head(self, uri, **kwargs):
+        request = Request()
+        request.build("HEAD", uri, **kwargs)
+        self.proc(request)
 
     def connect(self):
         pass
@@ -379,7 +405,17 @@ s = Session()
 
 # s.post("http://www.httpbin.org/post", data={"a": "1", "b": "2"}, )
 
-s.put("http://www.httpbin.org/put", content=b"66666")
+# s.put("http://www.httpbin.org/put", content=b"66666")
+
+# s.delete("http://www.httpbin.org/delete")
+
+# s.head("http://www.httpbin.org/head")
+
+s.options("http://www.httpbin.org/get")
+
+# 测试断点续传
+# s.get("http://down4.greenxiazai.com:8080/down/234000/201806/%E6%9A%B4%E9%A3%8E%E5%BD%B1%E9%9F%B35%20v5.76.0613.1111.rar")
+
 a = b"123"
 
 
