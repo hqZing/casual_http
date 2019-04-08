@@ -3,6 +3,9 @@ import re
 import dns.resolver
 import copy
 from collections import UserDict
+import fields as fs
+
+
 
 # DNS在本地缓存，不再每次都重复获取
 class DNS:
@@ -76,7 +79,14 @@ class StatusLine:
 
 class Headers(UserDict):
     """
-    继承字典类，对其进行功能增强, 这个类是整份代码里面用得最多、用得最爽的一个类
+    message-header = field-name ":" [ field-value ]
+    field-name     = token
+    field-value    = *( field-content | LWS )
+    field-content  = <the OCTETs making up the field-value
+                     and consisting of either *TEXT or combinations
+                     of token, separators, and quoted-string>
+
+    继承字典类，对其进行功能增强, 这个类是整份代码里面用得最多、用得最方便的一个类
     """
     def __init__(self, data=None, **kwargs):
         UserDict.__init__(self)
@@ -102,36 +112,42 @@ class Headers(UserDict):
         return "".join([k + ': ' + str(v) + '\r\n' for k, v in self.items()]).encode()
 
 
-class Cookie:
+class Cookies(UserDict):
+    """
+    chrome等浏览器的cookies存储在浏览器中。这里为了减小框架的体积，就直接放在内存里面了
+    cookies的组织策略也有待考究，比如requests库的cookies是绑定在单个Session里面的，不同的会话不共享cookies
+    但是浏览器的cookies是全局的，只要网站对应得上就可以取出来用
+    这里沿用requests库的做法，不同会话cookies不互通
+    为了加快检索速度，这里也继承字典类
 
-    def __init__(self,  host, ip, port, time, content):
-        self.host = host
-        self.ip = ip
-        self.port = port
-        self.time = time
-        self.content = content
+    根据同源政策，两个网址只要域名和端口相同，就可以共享cookies
 
+    """
 
-class CK:
+    class cookie:
+        def __init__(self, host, ip, port, time, content):
+            self.host = host
+            self.ip = ip
+            self.port = port
+            self.content = content
+
     """
     先使用最暴力的搜索方式，最后再构造效率更高的数据结构来替换
     """
     def __init__(self):
+        UserDict.__init__(self)
         self.cookies = []
 
     def append(self, host, ip, port, time, content):
-        self.cookies.append(Cookie(host, ip, port, time, content))
+        self.cookies.append(cookie(host, ip, port, time, content))
 
     def get(self, host, ip, port):
 
         for i in self.cookies:
-            # print(host, i.host)
-            # print(ip, i.ip)
-            # print(port, i.port)
             if (i.host == host or i.ip == ip) and i.port == port:
                 return i
         else:
-            return None     # 如果找不到返回一个None吧
+            return None     # 如果找不到返回一个None
 
 ck = CK()
 
@@ -406,9 +422,9 @@ class Session:
             self.recv_body(response, buffer)
 
         # print("proc done......")
-        print(response.status_line.__dict__)
-        print(response.headers)
-        print(response.body.text())
+        # print(response.status_line.__dict__)
+        # print(response.headers)
+        # print(response.body.bytes())
 
         self.last_response = response
         self.last_request = request
@@ -417,8 +433,6 @@ class Session:
         if response.headers.__contains__("Set-Cookie"):
             print(response.headers["Set-Cookie"])
             ck.append(request.conn_info["host"], request.conn_info["ip"], request.conn_info["port"], None, response.headers["Set-Cookie"])
-
-
         # 检测跳转，如果有跳转，强行转化为GET方法。（这里后期要进行规则细分，不同的3xx状态码处理方式不同）
         if re.match("3..", response.status_line.status_code) is not None:
             return self.get("http://" + request.headers["Host"] + response.headers["Location"])
@@ -428,7 +442,7 @@ class Session:
     def get(self, uri, **kwargs):
         request = Request()
         request.build("GET", uri, **kwargs)
-        self.proc(request)
+        return self.proc(request)
 
     def post(self, uri, **kwargs):
         request = Request()
@@ -464,8 +478,17 @@ class Session:
 
 s = Session()
 
-# s.get("http://www.httpbin.org/get?c=3", params={"a": "1", "b": 2}, )
+hds = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/71.0.3578.98 Safari/537.36",
+       "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
+       "Accept-Encoding": "gzip, deflate",
+       "Accept-Language": "zh-CN,zh;q=0.9",
+        "Accept-Ranges": "bytes"
+       }
+resp = s.get("http://iw.guet.edu.cn", headers=hds)
 
+print(resp.headers)
+print(resp.body.content)
+print(resp.body.content.__len__())
 # s.post("http://www.httpbin.org/post", data={"a": "1", "b": "2"}, )
 
 # s.put("http://www.httpbin.org/put", content=b"66666")
@@ -480,8 +503,8 @@ s = Session()
 # s.get("http://www.httpbin.org/redirect/3")
 
 # 测试cookies
-s.get("http://www.yiban.cn/", headers={"Connection": "close"})
-s.get("http://www.yiban.cn/",  headers={"Connection": "close"})
+# s.get("http://www.yiban.cn/", headers={"Connection": "close"})
+# s.get("http://www.yiban.cn/",  headers={"Connection": "close"})
 
 # 测试断点续传
 # s.get("http://down4.greenxiazai.com:8080/down/234000/201806/%E6%9A%B4%E9%A3%8E%E5%BD%B1%E9%9F%B35%20v5.76.0613.1111.rar")
