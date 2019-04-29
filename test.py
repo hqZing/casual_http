@@ -1,7 +1,6 @@
 from http_client import *
 
 
-
 # 测试get方法（不带参数）
 def test1():
     s = Session()
@@ -28,16 +27,6 @@ def test3():
     print(resp.body.text())
 # test3()
 
-
-# # 测试get方法（带参数, 带自定义请求头，请求头是字符串类型）
-# def test4():
-#     s = Session()
-#     resp = s.get("http://www.httpbin.org/get",
-#                  params={"a": 1, "b": 2},
-#                  headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 "
-#                                         "(KHTML, like Gecko) Chrome/71.0.3578.98 Safari/537.36"})
-#     print(resp.body.text())
-# # test4()
 
 # post方法，携带参数
 def test5():
@@ -96,15 +85,11 @@ def test11():
 # test11()
 
 
-# 登陆一个网站
+# 测试持久连接
 def test12():
     s = Session()
-    resp = s.post("http://bkjw2.guet.edu.cn/student/public/login.asp",
-                  data={"username": "%BB%C6%E7%F9",
-                        "passwd": "10010493",
-                        "login": "%B5%C7%A1%A1%C2%BC"})
-    print(resp.headers)
-    resp = s.get("http://bkjw2.guet.edu.cn/student/Info.asp")
-    print(resp.body.bytes())
-test12()
+    s.get("http://www.httpbin.org/get")
+    s.get("http://www.httpbin.org/get")
+
+# test12()
 

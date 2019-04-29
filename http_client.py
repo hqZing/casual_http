@@ -4,11 +4,14 @@ import dns.resolver
 import copy
 from collections import UserDict
 import fields as fs
+import ssl
 
 
 # DNS在本地缓存，不再每次都重复获取
 class DNS:
     dns_dict = {}
+
+    # 这个地方缓存永不过期，这么干可能会有问题，但考虑到这是个微框架，且少有网站会动不动更换解析地址，暂且这么用着
 
     @classmethod
     def get_dns(cls, host_string):
@@ -243,36 +246,49 @@ class Request:
             'port': 80,
             'request_uri': '/',
             'host': '',
-            'protocol': 'HTTP/1.1',
-            'ip': ''
+            'version': '1.1',
+            'ip': '',
+            "protocol": "http"
         }
 
     def parse_uri(self, uri):
         """
         这个函数是将URI解析为请求行的URI，顺便还将主机名和端口分析出来
-        # 将ip，端口等信息存起来
+        将ip，端口等信息存起来
+        业界有不成文规定，（大多数）浏览器通常都会限制url长度在2K个字节，而（大多数）服务器最多处理64K大小的url。
+
         """
+        uri_pattern = "((\w+):\/\/)?([^/:]+)(:\d*)?([^# ]*)"
+        uri_match = re.match(uri_pattern, uri)\
 
-        # 注意处理纯ip网址问题，不要用DNS解析纯ip的网址
+        if uri_match is None:
+            raise Exception("URI不合法!")
 
-        # 这几个正则表达式应该可以合并成一个的，目前水平不够，先用判断语句来实现
+        self.conn_info["protocol"] = uri_match.group(2)                  # 解析协议
+        self.conn_info["host"] = uri_match.group(3)                        # 解析主机名
+        self.conn_info["request_uri"] = uri_match.group(5)              # 解析请求uri
+        self.conn_info["port"] = uri_match.group(4)                      # 解析端口
 
-        # 解析主机名
-        temp = re.match("[^:]+://([^/:]+)", uri)
-        self.conn_info["host"] = temp.group(1)
+        # 默认协议http
+        if self.conn_info["protocol"] is None:
+            self.conn_info["protocol"] = "http"
 
-        # 解析端口
-        temp = re.match("[^:]+://[^/:]+:([0-9]+)", uri)
-        if temp is not None:
-            self.conn_info["port"] = int(temp.group(1))
+        # 默认端口80/443
+        if self.conn_info["port"] is None:
+            self.conn_info["port"] = 443 if self.conn_info["protocol"] == "https" else 80
+        else:
+            self.conn_info["port"] = self.conn_info["port"][1:]
 
-        # 解析request_uri
-        temp = re.match("[^:]+://[^/]+/(.+)", uri)
-        if temp is not None:
-            self.conn_info["request_uri"] += temp.group(1)
+        if self.conn_info["request_uri"] == "":
+            self.conn_info["request_uri"] = "/"
 
-        # 使用DNS解析域名得到ip
-        self.conn_info["ip"] = DNS.get_dns(self.conn_info["host"])
+        # 使用DNS解析域名得到ip，注意处理纯ip网址问题，不要用DNS解析纯ip的网址
+        if re.match("[.\d]+", self.conn_info["host"]) is None:
+            self.conn_info["ip"] = DNS.get_dns(self.conn_info["host"])
+        else:
+            self.conn_info["ip"] = self.conn_info["host"]
+
+        print(self.conn_info)
 
     def build(self, method, uri, **kwargs):
         """
@@ -299,8 +315,7 @@ class Request:
             self.headers += self.body.part_header   # 带上首部，指定实体的长度是多少，否则服务端将不能正确识别
 
         # content这个字段，不只是put请求会用到，post请求也可以通过设置这个东西来传输原始数据
-        # 避免了requests库那样子还要手动改装成字典
-        # 从抓包软件上面复制下来的数据就可以直接填入参数传进来了
+        # 这里可以接收字符串或者字典，直接输入原始数据放到报文主体里面也是可以的，不必要像requests那样一定封装成字典
         if "content" in kwargs:
             self.body.build(kwargs["content"])
             self.headers += self.body.part_header
@@ -396,8 +411,18 @@ class Session:
 
         if flag:
             # 直接创建新的套接字，旧的那个不关闭了，有时间再回来补全关闭套接字的代码，目前这个不影响程序
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.connect((ip, port))
+
+            # 如果是https
+            if request.conn_info["protocol"] == "https":
+
+                context = ssl.create_default_context()
+                self.socket = context.wrap_socket(socket.socket(socket.AF_INET),
+                                                  server_hostname=request.conn_info["host"])
+                self.socket.connect((ip, port))
+            # 如果是http
+            else:
+                self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.socket.connect((ip, port))
 
         self.socket.send(bytes_data)
 
@@ -479,4 +504,6 @@ class Session:
         pass
 
 
-
+s = Session()
+resp = s.get("https://www.guet.edu.cn")
+print(resp.body.text())
