@@ -7,21 +7,51 @@ import fields as fs
 import ssl
 
 
-# DNS在本地缓存，不再每次都重复获取
-class DNS:
-    dns_dict = {}
+# 需要合并到Util里面
+class Cookie:
+    def __init__(self, host, port, content):
+        self.host = host
+        self.port = port
+        self.content = content
 
-    # 这个地方缓存永不过期，这么干可能会有问题，但考虑到这是个微框架，且少有网站会动不动更换解析地址，暂且这么用着
+
+class Util:
+
+    # URL编码
+    @classmethod
+    def url_encode(cls, arg_str, safe_char="", encoding="utf-8"):
+        my_map = map(lambda x: x if x in safe_char else x.encode(encoding).__str__()[2:-1].replace("\\x", "%"), arg_str)
+        res_rtn = "".join(my_map)
+        return res_rtn
+
+    # DNS缓存，这个地方缓存永不过期，这么干可能会有问题，但考虑到这是个微框架，且少有网站会动不动更换解析地址，暂且这么用着
+    dns_dict = {}
 
     @classmethod
     def get_dns(cls, host_string):
 
-        if host_string in DNS.dns_dict:
-            return DNS.dns_dict[host_string]
+        if host_string in Util.dns_dict:
+            return Util.dns_dict[host_string]
         else:
             ip = dns.resolver.query(host_string, 'A').response.answer[-1].items[0].address
-            DNS.dns_dict.update({host_string: ip})
+            Util.dns_dict.update({host_string: ip})
             return ip
+
+    # 本地存储cookies
+    cookies = []
+
+    @classmethod
+    def append_cookies(cls, host, port, content):
+        Util.cookies.append(Cookie(host, port, content))
+
+    @classmethod
+    def get_cookies(cls, host, port):
+
+        for i in Util.cookies:
+            if i.host == host and i.port == port:
+                return i
+        else:
+            return None     # 如果找不到返回一个None
 
 
 class RequestLine:
@@ -114,45 +144,6 @@ class Headers(UserDict):
 
     def bytes(self):
         return "".join([k + ': ' + str(v) + '\r\n' for k, v in self.items()]).encode()
-
-
-class cookie:
-    def __init__(self, host, port, content):
-        self.host = host
-        self.port = port
-        self.content = content
-
-
-class Cookies:
-    """
-    chrome等浏览器的cookies存储在浏览器中。这里为了减小框架的体积，就直接放在内存里面了
-    cookies的组织策略也有待考究，比如requests库的cookies是绑定在单个Session里面的，不同的会话不共享cookies
-    但是浏览器的cookies是全局的，只要网站对应得上就可以取出来用
-    这里沿用requests库的做法，不同会话cookies不互通
-    为了加快检索速度，这里也继承字典类
-
-    根据同源策略，两个网址只要域名和端口相同，就可以共享cookies
-
-    先使用最暴力的搜索方式，最后再构造效率更高的数据结构来替换
-
-    """
-
-    def __init__(self):
-        self.cookies = []
-
-    def append(self, host, port, content):
-        self.cookies.append(cookie(host, port, content))
-
-    def get_cookies(self, host, port):
-
-        for i in self.cookies:
-            if i.host == host and i.port == port:
-                return i
-        else:
-            return None     # 如果找不到返回一个None
-
-
-ck = Cookies()
 
 
 class Body:
@@ -259,7 +250,7 @@ class Request:
 
         """
         uri_pattern = "((\w+):\/\/)?([^/:]+)(:\d*)?([^# ]*)"
-        uri_match = re.match(uri_pattern, uri)\
+        uri_match = re.match(uri_pattern, uri)
 
         if uri_match is None:
             raise Exception("URI不合法!")
@@ -279,12 +270,14 @@ class Request:
         else:
             self.conn_info["port"] = self.conn_info["port"][1:]
 
+        # 请求URL后面补全斜杠，并处理URL编码
         if self.conn_info["request_uri"] == "":
             self.conn_info["request_uri"] = "/"
+        self.conn_info["request_uri"] = Util.url_encode(self.conn_info["request_uri"], ";/?:@&=+$,", "utf-8")
 
         # 使用DNS解析域名得到ip，注意处理纯ip网址问题，不要用DNS解析纯ip的网址
         if re.match("[.\d]+", self.conn_info["host"]) is None:
-            self.conn_info["ip"] = DNS.get_dns(self.conn_info["host"])
+            self.conn_info["ip"] = Util.get_dns(self.conn_info["host"])
         else:
             self.conn_info["ip"] = self.conn_info["host"]
 
@@ -324,7 +317,7 @@ class Request:
         self.request_line.build(method.upper(), u)
 
         # 检查本地是否有cookies， 如果有就带上
-        cccc = ck.get_cookies(self.conn_info["host"], self.conn_info["port"])
+        cccc = Util.get_cookies(self.conn_info["host"], self.conn_info["port"])
         # print(cccc)
         # print(ck.cookies.__str__())
         if cccc is not None:
@@ -505,5 +498,6 @@ class Session:
 
 
 s = Session()
-resp = s.get("https://www.guet.edu.cn")
+resp = s.get("http://www.httpbin.org/get?a=啊啊啊")
 print(resp.body.text())
+
